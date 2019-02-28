@@ -17,14 +17,14 @@
 //! Environment definition of the wasm smart-contract runtime.
 
 use crate::{Schedule, Trait, CodeHash, ComputeDispatchFee};
+use crate::error::ContractError;
 use crate::exec::{Ext, BalanceOf, VmExecResult, OutputBuf, EmptyOutputBuf, CallReceipt, InstantiateReceipt};
 use crate::gas::{GasMeter, Token, GasMeterResult, approx_gas_for_balance};
 use sandbox;
 use system;
-use rstd::prelude::*;
-use rstd::mem;
+use rstd::{mem, prelude::*};
 use parity_codec::{Decode, Encode};
-use runtime_primitives::traits::{As, CheckedMul, Bounded};
+use runtime_primitives::traits::{As, CheckedMul, Bounded, One, Zero};
 
 /// Enumerates all possible *special* trap conditions.
 ///
@@ -140,14 +140,14 @@ fn charge_gas<T: Trait, Tok: Token<T>>(
 	gas_meter: &mut GasMeter<T>,
 	metadata: &Tok::Metadata,
 	token: Tok,
-) -> Result<(), sandbox::HostError> {
+) -> Result<(), ContractError> {
 	match gas_meter.charge(metadata, token) {
 		GasMeterResult::Proceed => Ok(()),
-		GasMeterResult::OutOfGas => Err(sandbox::HostError),
+		GasMeterResult::OutOfGas => Err(ContractError::OutOfGas),
 	}
 }
 
-/// Read designated chunk from the sandbox memory, consuming an appropriate amount of
+/// Read designated chunk from the´ sandbox memory, consuming an appropriate amount of
 /// gas.
 ///
 /// Returns `Err` if one of the following conditions occurs:
@@ -159,13 +159,12 @@ fn read_sandbox_memory<E: Ext>(
 	ctx: &mut Runtime<E>,
 	ptr: u32,
 	len: u32,
-) -> Result<Vec<u8>, sandbox::HostError> {
+) -> Result<Vec<u8>, ContractError> {
 	charge_gas(ctx.gas_meter, ctx.schedule, RuntimeToken::ReadMemory(len))?;
 
 	let mut buf = Vec::new();
 	buf.resize(len as usize, 0);
-
-	ctx.memory().get(ptr, &mut buf)?;
+	ctx.memory().get(ptr, &mut buf).map_err(|_| ContractError::memory())?;
 
 	Ok(buf)
 }
@@ -184,7 +183,7 @@ fn write_sandbox_memory<T: Trait>(
 	memory: &sandbox::Memory,
 	ptr: u32,
 	buf: &[u8],
-) -> Result<(), sandbox::HostError> {
+) -> Result<(), ContractError> {
 	charge_gas(gas_meter, schedule, RuntimeToken::WriteMemory(buf.len() as u32))?;
 
 	memory.set(ptr, buf)?;
@@ -243,10 +242,10 @@ define_env!(Env, <E: Ext>,
 		let key = read_sandbox_memory(ctx, key_ptr, 32)?;
 		if let Some(value) = ctx.ext.get_storage(&key) {
 			ctx.scratch_buf = value;
-			Ok(0)
+			Ok(Zero::zero())
 		} else {
 			ctx.scratch_buf.clear();
-			Ok(1)
+			Ok(One::one())
 		}
 	},
 
@@ -278,12 +277,12 @@ define_env!(Env, <E: Ext>,
 		let callee = {
 			let callee_buf = read_sandbox_memory(ctx, callee_ptr, callee_len)?;
 			<<E as Ext>::T as system::Trait>::AccountId::decode(&mut &callee_buf[..])
-				.ok_or_else(|| sandbox::HostError)?
+				.ok_or_else(|| ContractError::codec())?
 		};
 		let value = {
 			let value_buf = read_sandbox_memory(ctx, value_ptr, value_len)?;
 			BalanceOf::<<E as Ext>::T>::decode(&mut &value_buf[..])
-				.ok_or_else(|| sandbox::HostError)?
+				.ok_or_else(|| ContractError::codec())?
 		};
 		let input_data = read_sandbox_memory(ctx, input_data_ptr, input_data_len)?;
 
@@ -292,7 +291,7 @@ define_env!(Env, <E: Ext>,
 		let scratch_buf = mem::replace(&mut ctx.scratch_buf, Vec::new());
 		let empty_output_buf = EmptyOutputBuf::from_spare_vec(scratch_buf);
 
-		let nested_gas_limit = if gas == 0 {
+		let nested_gas_limit = if gas.is_zero() {
 			ctx.gas_meter.gas_left()
 		} else {
 			<<E::T as Trait>::Gas as As<u64>>::sa(gas)
@@ -318,9 +317,9 @@ define_env!(Env, <E: Ext>,
 		match call_outcome {
 			Ok(CallReceipt { output_data }) => {
 				ctx.scratch_buf = output_data;
-				Ok(0)
+				Ok(Zero::zero())
 			},
-			Err(_) => Ok(1),
+			Err(_) => Ok(One::one()),
 		}
 	},
 
@@ -353,19 +352,19 @@ define_env!(Env, <E: Ext>,
 	) -> u32 => {
 		let code_hash = {
 			let code_hash_buf = read_sandbox_memory(ctx, init_code_ptr, init_code_len)?;
-			<CodeHash<<E as Ext>::T>>::decode(&mut &code_hash_buf[..]).ok_or_else(|| sandbox::HostError)?
+			<CodeHash<<E as Ext>::T>>::decode(&mut &code_hash_buf[..]).ok_or_else(|| ContractError::codec())?
 		};
 		let value = {
 			let value_buf = read_sandbox_memory(ctx, value_ptr, value_len)?;
 			BalanceOf::<<E as Ext>::T>::decode(&mut &value_buf[..])
-				.ok_or_else(|| sandbox::HostError)?
+				.ok_or_else(|| ContractError::codec())?
 		};
 		let input_data = read_sandbox_memory(ctx, input_data_ptr, input_data_len)?;
 
 		// Clear the scratch buffer in any case.
 		ctx.scratch_buf.clear();
 
-		let nested_gas_limit = if gas == 0 {
+		let nested_gas_limit = if gas.is_zero() {
 			ctx.gas_meter.gas_left()
 		} else {
 			<<E::T as Trait>::Gas as As<u64>>::sa(gas)
@@ -390,9 +389,9 @@ define_env!(Env, <E: Ext>,
 			Ok(InstantiateReceipt { address }) => {
 				// Write the address to the scratch buffer.
 				address.encode_to(&mut ctx.scratch_buf);
-				Ok(0)
+				Ok(Zero::zero())
 			},
-			Err(_) => Ok(1),
+			Err(_) => Ok(One::one()),
 		}
 	},
 
@@ -407,7 +406,7 @@ define_env!(Env, <E: Ext>,
 			)
 		{
 			GasMeterResult::Proceed => (),
-			GasMeterResult::OutOfGas => return Err(sandbox::HostError),
+			GasMeterResult::OutOfGas => return Err(Execution(OutOfGas),
 		}
 
 		let empty_output_buf = ctx
@@ -431,7 +430,7 @@ define_env!(Env, <E: Ext>,
 		// The trap mechanism is used to immediately terminate the execution.
 		// This trap should be handled appropriately before returning the result
 		// to the user of this crate.
-		Err(sandbox::HostError)
+		Err(Execution(Execution(None))
 	},
 
 	// Stores the address of the caller into the scratch buffer.
@@ -504,7 +503,7 @@ define_env!(Env, <E: Ext>,
 		let call = {
 			let call_buf = read_sandbox_memory(ctx, call_ptr, call_len)?;
 			<<<E as Ext>::T as Trait>::Call>::decode(&mut &call_buf[..])
-				.ok_or_else(|| sandbox::HostError)?
+				.ok_or_else(|| ContractError::codec())?
 		};
 
 		// Charge gas for dispatching this call.
@@ -530,13 +529,13 @@ define_env!(Env, <E: Ext>,
 		let offset = offset as usize;
 		if offset > ctx.input_data.len() {
 			// Offset can't be larger than input buffer length.
-			return Err(sandbox::HostError);
+			return Err(Execution(Execution(Reason::InvalidMemoryAccess));
 		}
 
 		// This can't panic since `offset <= ctx.input_data.len()`.
 		let src = &ctx.input_data[offset..];
 		if src.len() != len as usize {
-			return Err(sandbox::HostError);
+			return Err(Execution(Execution(Reason::InvalidMemoryAccess));
 		}
 
 		// Finally, perform the write.
@@ -562,13 +561,13 @@ define_env!(Env, <E: Ext>,
 		let offset = offset as usize;
 		if offset > ctx.scratch_buf.len() {
 			// Offset can't be larger than scratch buffer length.
-			return Err(sandbox::HostError);
+			return Err(Execution(Execution(Reason::InvalidMemoryAccess));
 		}
 
 		// This can't panic since `offset <= ctx.scratch_buf.len()`.
 		let src = &ctx.scratch_buf[offset..];
 		if src.len() != len as usize {
-			return Err(sandbox::HostError);
+			return Err(Execution(Execution(Reason::InvalidMemoryAccess));
 		}
 
 		// Finally, perform the write.

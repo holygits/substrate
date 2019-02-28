@@ -228,13 +228,13 @@ decl_module! {
 			// Dispatch every recorded call with an appropriate origin.
 			ctx.calls.into_iter().for_each(|(who, call)| {
 				let result = call.dispatch(RawOrigin::Signed(who.clone()).into());
-				Self::deposit_event(RawEvent::Dispatched(who, result.is_ok()));
+				Self::deposit_event(RawEvent::Dispatched(who, result));
 			});
 
 			result.map(|_| ())
 		}
 
-		/// Create a new contract, optionally transfering some balance to the created account.
+		/// Create a new contract, optionally transferring some balance to the created account.
 		///
 		/// Creation is executed as follows:
 		///
@@ -312,9 +312,10 @@ decl_event! {
 		/// Triggered when the current schedule is updated.
 		ScheduleUpdated(u32),
 
-		/// A call was dispatched from the given account. The bool signals whether it was
-		/// successful execution or not.
-		Dispatched(AccountId, bool),
+		/// A call was dispatched from the given account.
+		/// The result signals successful execution or not. Returns the error type
+		/// on failure.
+		Dispatched(AccountId, Result<(), RuntimeError>),
 	}
 }
 
